@@ -1,95 +1,108 @@
 import os
-import logging
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
-from keep_alive import keep_alive
-import aiohttp
 import asyncio
+import logging
+import requests
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
+# 🔐 Константи
 BOT_TOKEN = "8441710554:AAGFDgaFwQpcx3bFQ-2FgjjlkK7CEKxmz34"
-CHAT_ID = "681357425"
+CHAT_ID = 681357425
 MEXC_API_KEY = "mx0vglwSqWMNfUkdXo"
 MEXC_SECRET_KEY = "7107c871e7dc4e3db79f4fddb07e917d"
 
-user_margin = 100
-user_leverage = {"SOL": 300, "PEPE": 300, "BTC": 500, "ETH": 500}
-tracked_symbols = ["SOL_USDT", "PEPE_USDT", "BTC_USDT", "ETH_USDT"]
+# 📊 Монети та маржа
+moneta_list = ["SOL", "PEPE", "BTC", "ETH"]
+marzha = 100
+pleche = {
+    "SOL": 300,
+    "PEPE": 300,
+    "BTC": 500,
+    "ETH": 500,
+}
 
+# 📋 Логування
 logging.basicConfig(level=logging.INFO)
 
+# 📉 Отримання ціни з MEXC
+def get_price(symbol):
+    try:
+        url = f"https://api.mexc.com/api/v3/ticker/price?symbol={symbol}USDT"
+        response = requests.get(url)
+        data = response.json()
+        return float(data["price"])
+    except Exception as e:
+        print(f"Помилка отримання ціни {symbol}: {e}")
+        return None
+
+# 🧠 Генерація сигналу
+def generate_signal(symbol, price):
+    if not price:
+        return None
+
+    entry = price
+    direction = "LONG" if int(str(price)[-1]) % 2 == 0 else "SHORT"
+    sl = round(entry * (0.995 if direction == "LONG" else 1.005), 5)
+    tp = round(entry * (1.05 if direction == "LONG" else 0.95), 5)
+    return (
+        f"🚀 Сигнал {direction} по {symbol}\n\n"
+        f"💰 Вхід: {entry}\n"
+        f"🛡️ SL: {sl}\n"
+        f"🎯 TP: {tp}\n"
+        f"💵 Маржа: ${marzha}\n"
+        f"📈 Плече: {pleche[symbol]}×"
+    )
+
+# 🔁 Регулярна перевірка
+async def check_market(app: ApplicationBuilder):
+    while True:
+        for coin in moneta_list:
+            price = get_price(coin)
+            signal = generate_signal(coin, price)
+            if signal:
+                await app.bot.send_message(chat_id=CHAT_ID, text=signal)
+        await asyncio.sleep(30)
+
+# 🧾 Команди
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Ціни зараз"], ["Змінити маржу", "Змінити плече"], ["Додати монету"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Привіт! Обери дію ⬇️", reply_markup=reply_markup)
 
-async def get_price(symbol):
-    url = f"https://api.mexc.com/api/v3/ticker/price?symbol={symbol}"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as r:
-                data = await r.json()
-                return float(data["price"])
-    except Exception:
-        return None
+async def prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = "📊 Поточні ціни:\n"
+    for coin in moneta_list:
+        price = get_price(coin)
+        msg += f"{coin}: {price if price else 'н/д'}\n"
+    await update.message.reply_text(msg)
 
-def calculate_sl_tp(entry, direction, leverage):
-    sl_percent = 0.005  # 0.5%
-    tp_percent = 0.04   # 4%
-    if direction == "LONG":
-        return round(entry * (1 - sl_percent), 4), round(entry * (1 + tp_percent), 4)
-    else:
-        return round(entry * (1 + sl_percent), 4), round(entry * (1 - tp_percent), 4)
-
-async def check_market(context: ContextTypes.DEFAULT_TYPE):
-    for symbol in tracked_symbols:
-        base = symbol.split("_")[0]
-        price = await get_price(symbol.replace("_", ""))
-        if price is None:
-            return
-        direction = "LONG" if int(price * 1000) % 2 == 0 else "SHORT"
-        sl, tp = calculate_sl_tp(price, direction, user_leverage.get(base, 300))
-        msg = (
-            f"💰 <b>Сигнал {direction} по {base}</b>\n\n"
-            f"🔹 Вхід: <code>{price}</code>\n"
-            f"🛡️ SL: <code>{sl}</code>\n"
-            f"🎯 TP: <code>{tp}</code>\n"
-            f"⚙️ Плече: <b>{user_leverage.get(base, 300)}×</b>\n"
-            f"💼 Маржа: <b>{user_margin}$</b>\n"
-        )
-        await context.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode='HTML')
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global user_margin
-    text = update.message.text.strip().lower()
-    if "ціни" in text:
-        await update.message.reply_text("Ціни завантажуються...")
-        for symbol in tracked_symbols:
-            price = await get_price(symbol.replace("_", ""))
-            if price:
-                await update.message.reply_text(f"{symbol.replace('_', '/')} → {price}")
-    elif "маржу" in text:
-        await update.message.reply_text("Введи нову маржу:")
-        context.user_data["awaiting_margin"] = True
-    elif "плече" in text:
-        await update.message.reply_text("Функція зміни плеча у розробці.")
-    elif context.user_data.get("awaiting_margin"):
-        try:
-            new_margin = int(text)
-            user_margin = new_margin
-            context.user_data["awaiting_margin"] = False
-            await update.message.reply_text(f"Маржу змінено на {new_margin}$ ✅")
-        except ValueError:
-            await update.message.reply_text("Будь ласка, введи число.")
-    else:
+# ✏️ Обробка повідомлень
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.lower()
+    if "привіт" in text:
         await start(update, context)
+    elif "ціни" in text:
+        await prices(update, context)
+    else:
+        await update.message.reply_text("Команда не розпізнана. Обери дію з меню ⬇️")
 
+# 🚀 Запуск
 async def main():
-    keep_alive()
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
-    application.job_queue.run_repeating(check_market, interval=30, first=5)
-    await application.run_polling()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # ✅ Запускаємо перевірку ринку
+    asyncio.create_task(check_market(app))
+
+    await app.run_polling()
 
 if __name__ == "__main__":
     asyncio.run(main())
