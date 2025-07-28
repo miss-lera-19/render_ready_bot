@@ -12,22 +12,17 @@ from telegram.ext import (
     filters,
 )
 
-# --- КОНСТАНТИ ---
 BOT_TOKEN = "8441710554:AAGFDgaFwQpcx3bFQ-2FgjjlkK7CEKxmz34"
 CHAT_ID = 681357425
-MEXC_API_KEY = "mx0vglwSqWMNfUkdXo"
-MEXC_SECRET_KEY = "7107c871e7dc4e3db79f4fddb07e917d"
 
 coins = ["SOL", "PEPE", "BTC", "ETH"]
 leverage = {"SOL": 300, "PEPE": 300, "BTC": 500, "ETH": 500}
-margin = 100  # Стартова маржа в USDT
+margin = 100
 
-# --- ЛОГІ ---
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 
-# --- Отримання поточної ціни ---
 async def get_price(symbol: str) -> float:
     url = f"https://api.mexc.com/api/v3/ticker/price?symbol={symbol}USDT"
     try:
@@ -38,7 +33,6 @@ async def get_price(symbol: str) -> float:
     except Exception:
         return None
 
-# --- Генерація сигналу ---
 async def generate_signal(symbol: str, price: float) -> str:
     lev = leverage[symbol]
     entry = round(price, 5 if symbol == "PEPE" else 2)
@@ -57,17 +51,15 @@ async def generate_signal(symbol: str, price: float) -> str:
         f"#trade #signal #crypto"
     )
 
-# --- Перевірка ринку ---
-async def check_market(application):
+async def check_market(app):
     for coin in coins:
         price = await get_price(coin)
         if price:
             signal = await generate_signal(coin, price)
-            await application.bot.send_message(chat_id=CHAT_ID, text=signal, parse_mode="Markdown")
+            await app.bot.send_message(chat_id=CHAT_ID, text=signal, parse_mode="Markdown")
         else:
-            await application.bot.send_message(chat_id=CHAT_ID, text=f"⚠️ Не вдалося отримати ціну {coin}")
+            await app.bot.send_message(chat_id=CHAT_ID, text=f"⚠️ Не вдалося отримати ціну {coin}")
 
-# --- Команди ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Ціни зараз"], ["Змінити маржу", "Змінити плече", "Додати монету"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -128,21 +120,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Монета вже є")
         context.user_data["expecting_coin"] = False
 
-# --- Запуск ---
 async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    await app.initialize()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.job_queue.run_repeating(lambda ctx: check_market(app), interval=30, first=10)
-    await app.run_polling()
+
+    # Ставимо задачу повторно
+    app.job_queue.run_repeating(lambda ctx: asyncio.create_task(check_market(app)), interval=30, first=10)
+
+    await app.start()
+    await app.updater.start_polling()
+    await app.updater.idle()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except RuntimeError as e:
-        if "cannot close a running event loop" in str(e).lower():
-            loop = asyncio.get_event_loop()
-            loop.create_task(main())
-            loop.run_forever()
-        else:
-            raise
+    asyncio.run(main())
