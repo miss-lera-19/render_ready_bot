@@ -16,14 +16,11 @@ BOT_TOKEN = "8441710554:AAGFDgaFwQpcx3bFQ-2FgjjlkK7CEKxmz34"
 CHAT_ID = 681357425
 COINS = ["SOL_USDT", "PEPE_USDT", "BTC_USDT", "ETH_USDT"]
 
-# 🧠 Початкові параметри
 leverage = {"SOL_USDT": 300, "PEPE_USDT": 300, "BTC_USDT": 500, "ETH_USDT": 500}
 margin = 100
 
-# 🔧 Логування
 logging.basicConfig(level=logging.INFO)
 
-# 🧮 Отримати поточну ціну монети з MEXC API
 def get_price(symbol: str):
     try:
         url = f"https://api.mexc.com/api/v3/ticker/price?symbol={symbol}"
@@ -34,7 +31,6 @@ def get_price(symbol: str):
         logging.warning(f"❌ Помилка отримання ціни для {symbol}: {e}")
         return None
 
-# 📊 Стратегія: простий аналіз ціни
 def generate_signal(symbol: str, price: float):
     if symbol == "SOL_USDT":
         if price < 181:
@@ -58,7 +54,6 @@ def generate_signal(symbol: str, price: float):
             return "SHORT"
     return None
 
-# 📢 Надсилання сигналу
 async def send_signal(context: ContextTypes.DEFAULT_TYPE, symbol: str, signal: str, price: float):
     lev = leverage[symbol]
     global margin
@@ -75,7 +70,6 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE, symbol: str, signal: s
     )
     await context.bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="HTML")
 
-# 🔄 Перевірка ринку кожні 30 секунд
 async def check_market(context: ContextTypes.DEFAULT_TYPE):
     for symbol in COINS:
         price = get_price(symbol)
@@ -84,12 +78,10 @@ async def check_market(context: ContextTypes.DEFAULT_TYPE):
             if signal:
                 await send_signal(context, symbol, signal, price)
 
-# 🟢 Старт
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [["Ціни зараз"], ["Змінити маржу", "Змінити плече"], ["Додати монету"]]
     await update.message.reply_text("Привіт! Обери дію ⬇️", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
 
-# 📍 Команди
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global margin
     text = update.message.text
@@ -136,16 +128,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Вибери дію з меню або введи коректну команду.")
 
-# 🚀 Запуск бота
+# 🔧 Головна функція запуску
 async def main():
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # ✅ Оновлений правильний виклик job queue
-    application.job_queue.run_repeating(check_market, interval=30, first=10)
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    await application.run_polling()
+    await app.initialize()
+    app.job_queue.run_repeating(check_market, interval=30, first=10)
+    await app.start()
+    await app.updater.start_polling()
+    await app.updater.idle()
 
 if __name__ == "__main__":
     asyncio.run(main())
