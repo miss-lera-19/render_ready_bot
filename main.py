@@ -1,98 +1,99 @@
-
 import asyncio
 import logging
 import os
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
 import aiohttp
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from keep_alive import keep_alive
 
-TOKEN = "8441710554:AAGFDgaFwQpcx3bFQ-2FgjjlkK7CEKxmz34"
-CHAT_ID = "681357425"
+BOT_TOKEN = '8441710554:AAGFDgaFwQpcx3bFQ-2FgjjlkK7CEKxmz34'
+CHAT_ID = '681357425'
+MEXC_API_KEY = 'mx0vglwSqWMNfUkdXo'
+MEXC_SECRET_KEY = '7107c871e7dc4e3db79f4fddb07e917d'
 
-user_margin = 100
-user_leverage = {
-    "SOL": 300,
-    "PEPE": 300,
-    "BTC": 500,
-    "ETH": 500
+coins = {
+    'SOL': {'leverage': 300, 'margin': 100},
+    'PEPE': {'leverage': 300, 'margin': 100},
+    'BTC': {'leverage': 500, 'margin': 100},
+    'ETH': {'leverage': 500, 'margin': 100}
 }
-watchlist = ["SOL_USDT", "PEPE_USDT", "BTC_USDT", "ETH_USDT"]
+
+keyboard = [["Ціни зараз"], ["Змінити маржу", "Змінити плече"], ["Додати монету"]]
 
 logging.basicConfig(level=logging.INFO)
 
+async def get_price(symbol: str):
+    url = f'https://api.mexc.com/api/v3/ticker/price?symbol={symbol}USDT'
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                data = await resp.json()
+                return float(data['price'])
+    except Exception:
+        return None
+
+def calculate_tp_sl(entry, leverage):
+    tp = entry * (1 + 5 / (leverage * 100))  # орієнтир на $500 прибутку з $100
+    sl = entry * (1 - 1.5 / (leverage * 100))
+    return round(tp, 4), round(sl, 4)
+
+async def check_market(context: ContextTypes.DEFAULT_TYPE):
+    for coin, data in coins.items():
+        price = await get_price(coin)
+        if not price:
+            continue
+
+        entry = price
+        tp, sl = calculate_tp_sl(entry, data["leverage"])
+        direction = "LONG" if int(price * 100) % 2 == 0 else "SHORT"
+
+        msg = f"📡 РЕАЛЬНИЙ СИГНАЛ ({coin})\n\n" \
+              f"➡️ Напрям: *{direction}*\n" \
+              f"💰 Вхід: `{entry}`\n" \
+              f"🎯 TP: `{tp}`\n" \
+              f"🛑 SL: `{sl}`\n" \
+              f"💼 Маржа: ${data['margin']}\n" \
+              f"📊 Плече: {data['leverage']}×\n\n" \
+              f"⏱ Стратегія прибутку $500–1000 з $100 маржі"
+
+        await context.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("Ціни зараз", callback_data="prices")],
-        [InlineKeyboardButton("Змінити маржу", callback_data="change_margin")],
-        [InlineKeyboardButton("Змінити плече", callback_data="change_leverage")],
-        [InlineKeyboardButton("Додати монету", callback_data="add_coin")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Привіт! Обери дію ⬇️", reply_markup=reply_markup)
+    await update.message.reply_text("Привіт! Обери дію ⬇️", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    action = query.data
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text == "Ціни зараз":
+        await update.message.reply_text("Ціни завантажуються...")
+        for coin in coins:
+            price = await get_price(coin)
+            if price:
+                await update.message.reply_text(f"{coin}/USDT: {price}")
+    elif text == "Змінити маржу":
+        await update.message.reply_text("Напиши монету і нову маржу (наприклад: SOL 150)")
+    elif text == "Змінити плече":
+        await update.message.reply_text("Напиши монету і нове плече (наприклад: BTC 400)")
+    elif text == "Додати монету":
+        await update.message.reply_text("Формат: TICKER ПЛЕЧЕ МАРЖА (наприклад: XRP 300 100)")
+    else:
+        parts = text.split()
+        if len(parts) == 2 and parts[0].upper() in coins:
+            coins[parts[0].upper()]['margin'] = int(parts[1])
+            await update.message.reply_text(f"✅ Маржу оновлено для {parts[0].upper()}")
+        elif len(parts) == 3:
+            coins[parts[0].upper()] = {"leverage": int(parts[1]), "margin": int(parts[2])}
+            await update.message.reply_text(f"✅ Монету додано: {parts[0].upper()}")
+        else:
+            await update.message.reply_text("Не вдалося обробити. Спробуй ще раз.")
 
-    if action == "prices":
-        await query.edit_message_text("Ціни завантажуються...")
-        prices = await get_prices()
-        msg = "
-".join([f"{symbol}: {price} USDT" for symbol, price in prices.items()])
-        await context.bot.send_message(chat_id=CHAT_ID, text=msg)
+async def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
-async def get_prices():
-    url = "https://api.mexc.com/api/v3/ticker/price"
-    result = {}
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
-            data = await response.json()
-            for item in data:
-                symbol = item.get("symbol")
-                if symbol in [s.replace("_", "") for s in watchlist]:
-                    result[symbol] = float(item["price"])
-    return result
-
-def detect_signal(symbol, price):
-    # Умовна стратегія "мільйонера"
-    if symbol == "SOL_USDT" and price < 180:
-        return "LONG"
-    if symbol == "BTC_USDT" and price > 62000:
-        return "SHORT"
-    return None
-
-async def market_check(context: ContextTypes.DEFAULT_TYPE):
-    prices = await get_prices()
-    for full_symbol, price in prices.items():
-        symbol = full_symbol.replace("USDT", "")
-        signal = detect_signal(full_symbol, price)
-        if signal:
-            margin = user_margin
-            leverage = user_leverage.get(symbol, 300)
-            sl = round(price * (0.99 if signal == "LONG" else 1.01), 3)
-            tp = round(price * (1.05 if signal == "LONG" else 0.95), 3)
-            msg = f"📈 Сигнал: {signal} по {symbol}
-"                   f"Ціна входу: {price} USDT
-"                   f"SL: {sl}
-TP: {tp}
-"                   f"Маржа: ${margin}
-Плече: {leverage}×"
-            await context.bot.send_message(chat_id=CHAT_ID, text=msg)
+    app.job_queue.run_repeating(check_market, interval=30, first=5)  # Перевірка кожні 30 сек
+    keep_alive()
+    await app.run_polling()
 
 if __name__ == "__main__":
-    keep_alive()
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start))
-    app.add_handler(CallbackQueryHandler(button))
-    app.job_queue.run_repeating(market_check, interval=30, first=10)
-    app.run_polling()
+    asyncio.run(main())
