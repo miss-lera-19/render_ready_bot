@@ -10,6 +10,7 @@ from telegram.ext import (
     MessageHandler,
     ContextTypes,
     filters,
+    JobQueue,
 )
 
 BOT_TOKEN = "8441710554:AAGFDgaFwQpcx3bFQ-2FgjjlkK7CEKxmz34"
@@ -51,14 +52,14 @@ async def generate_signal(symbol: str, price: float) -> str:
         f"#trade #signal #crypto"
     )
 
-async def check_market(app):
+async def check_market(context: ContextTypes.DEFAULT_TYPE):
     for coin in coins:
         price = await get_price(coin)
         if price:
             signal = await generate_signal(coin, price)
-            await app.bot.send_message(chat_id=CHAT_ID, text=signal, parse_mode="Markdown")
+            await context.bot.send_message(chat_id=CHAT_ID, text=signal, parse_mode="Markdown")
         else:
-            await app.bot.send_message(chat_id=CHAT_ID, text=f"⚠️ Не вдалося отримати ціну {coin}")
+            await context.bot.send_message(chat_id=CHAT_ID, text=f"⚠️ Не вдалося отримати ціну {coin}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Ціни зараз"], ["Змінити маржу", "Змінити плече", "Додати монету"]]
@@ -127,8 +128,8 @@ async def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Ставимо задачу повторно
-    app.job_queue.run_repeating(lambda ctx: asyncio.create_task(check_market(app)), interval=30, first=10)
+    job_queue = app.job_queue
+    job_queue.run_repeating(check_market, interval=30, first=10)
 
     await app.start()
     await app.updater.start_polling()
