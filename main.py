@@ -1,119 +1,159 @@
-import requests
+import logging
 import asyncio
-from telegram import Update, ReplyKeyboardMarkup
+import requests
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ContextTypes,
-    MessageHandler, filters
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters
 )
 
 BOT_TOKEN = "8441710554:AAGFDgaFwQpcx3bFQ-2FgjjlkK7CEKxmz34"
-CHAT_ID = "681357425"
-MEXC_API_KEY = "mx0vglwSqWMNfUkdXo"
-MEXC_SECRET_KEY = "7107c871e7dc4e3db79f4fddb07e917d"
+CHAT_ID = 681357425
 
 user_settings = {
-    "leverage": {"SOL": 300, "BTC": 500, "ETH": 500},
+    "symbols": ["SOLUSDT", "BTCUSDT", "ETHUSDT"],
+    "leverage": {"SOLUSDT": 300, "BTCUSDT": 500, "ETHUSDT": 500},
     "margin": 100,
-    "symbols": ["SOL", "BTC", "ETH"],
     "auto_signals": True
 }
 
-keyboard = ReplyKeyboardMarkup(
-    keyboard=[["Запитати сигнали", "Зупинити сигнали"],
-              ["Змінити плече", "Змінити маржу"],
-              ["Додати монету", "Видалити монету"]],
-    resize_keyboard=True
-)
+logging.basicConfig(level=logging.INFO)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Бот запущено ✅", reply_markup=keyboard)
-
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip().lower()
-
-    if text == "зупинити сигнали":
-        user_settings["auto_signals"] = False
-        await update.message.reply_text("Автосигнали вимкнено ❌")
-
-    elif text == "запитати сигнали":
-        await send_signals(context)
-
-    elif text == "змінити плече":
-        await update.message.reply_text("Введи монету і нове плече (наприклад: SOL 200)")
-
-    elif text == "змінити маржу":
-        await update.message.reply_text("Введи нову маржу у $ (наприклад: 120)")
-
-    elif text == "додати монету":
-        await update.message.reply_text("Введи монету, яку хочеш додати (наприклад: ARB)")
-
-    elif text == "видалити монету":
-        await update.message.reply_text("Введи монету, яку хочеш видалити (наприклад: ETH)")
-
-    else:
-        words = text.upper().split()
-        if len(words) == 2 and words[0] in user_settings["symbols"]:
-            try:
-                user_settings["leverage"][words[0]] = int(words[1])
-                await update.message.reply_text(f"Плече для {words[0]} змінено на {words[1]}×")
-            except:
-                pass
-        elif text.isdigit():
-            user_settings["margin"] = int(text)
-            await update.message.reply_text(f"Маржу змінено на ${text}")
-        elif text.upper() in user_settings["symbols"]:
-            user_settings["symbols"].remove(text.upper())
-            await update.message.reply_text(f"{text.upper()} видалено з моніторингу")
-        else:
-            symbol = text.upper()
-            user_settings["symbols"].append(symbol)
-            await update.message.reply_text(f"{symbol} додано до моніторингу")
-
-async def send_signals(context: ContextTypes.DEFAULT_TYPE):
-    for symbol in user_settings["symbols"]:
-        price = await get_price(symbol)
-        if price:
-            signal = await generate_signal(symbol, price)
-            if signal:
-                await context.bot.send_message(chat_id=CHAT_ID, text=signal)
-
+# Отримання ціни з MEXC API
 async def get_price(symbol):
     try:
-        url = f"https://api.mexc.com/api/v3/ticker/price?symbol={symbol}USDT"
+        url = f"https://api.mexc.com/api/v3/ticker/24hr?symbol={symbol}"
         r = requests.get(url, timeout=5)
-        return float(r.json()["price"])
+        data = r.json()
+        return float(data["lastPrice"]), float(data["quoteVolume"]), float(data["highPrice"]), float(data["lowPrice"])
+    except:
+        return None, None, None, None
+
+# Стратегія генерації сигналу
+async def generate_signal(symbol):
+    price, volume, high, low = await get_price(symbol)
+    if not price:
+        return None
+
+    try:
+        candles = requests.get(f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval=1m&limit=5").json()
+        last_close = float(candles[-1][4])
+        prev_close = float(candles[-2][4])
+        last_volume = float(candles[-1][5])
+        avg_volume = sum(float(c[5]) for c in candles[:-1]) / (len(candles) - 1)
     except:
         return None
 
-async def generate_signal(symbol, price):
-    # Імітація професійного аналізу: поточна ціна, динаміка свічки, тренд
-    import random
-    trend = random.choice(["long", "short"])
-    leverage = user_settings["leverage"].get(symbol, 300)
+    if last_close > prev_close and last_volume >= avg_volume:
+        trend = "long"
+    elif last_close < prev_close and last_volume >= avg_volume:
+        trend = "short"
+    else:
+        return None
+
+    leverage = user_settings["leverage"].get(symbol, 100)
     margin = user_settings["margin"]
     entry = price
     tp = round(price * (1.10 if trend == "long" else 0.90), 4)
     sl = round(price * (0.98 if trend == "long" else 1.02), 4)
 
-    return (f"📉 Сигнал на {trend.upper()} по {symbol}/USDT\n"
-            f"Вхід: {entry} USDT\n"
-            f"Take Profit: {tp}\n"
-            f"Stop Loss: {sl}\n"
-            f"Плече: {leverage}×\n"
-            f"Маржа: ${margin}\n")
+    return (
+        f"📈 Сигнал на {trend.upper()} по {symbol}:\n"
+        f"🔹 Вхід: {entry} USDT\n"
+        f"🎯 Take Profit: {tp}\n"
+        f"🛑 Stop Loss: {sl}\n"
+        f"💥 Плече: {leverage}x\n"
+        f"💰 Маржа: ${margin}"
+    )
 
+# Надсилання сигналів
+async def send_signals(context: ContextTypes.DEFAULT_TYPE):
+    for symbol in user_settings["symbols"]:
+        signal = await generate_signal(symbol)
+        if signal:
+            await context.bot.send_message(chat_id=CHAT_ID, text=signal)
+
+# Авто-сигнали
 async def auto_check_signals(app):
     while True:
         if user_settings["auto_signals"]:
             await send_signals(ContextTypes.DEFAULT_TYPE(application=app))
         await asyncio.sleep(60)
 
+# Команди Telegram
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    buttons = [
+        [InlineKeyboardButton("Запитати сигнали", callback_data="signal")],
+        [InlineKeyboardButton("Зупинити сигнали", callback_data="stop")],
+        [InlineKeyboardButton("Змінити плече", callback_data="leverage")],
+        [InlineKeyboardButton("Змінити маржу", callback_data="margin")],
+        [InlineKeyboardButton("Додати монету", callback_data="add")],
+        [InlineKeyboardButton("Видалити монету", callback_data="remove")],
+    ]
+    reply_markup = InlineKeyboardMarkup(buttons)
+    await update.message.reply_text("👋 Бот активний. Оберіть дію:", reply_markup=reply_markup)
+
+async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "signal":
+        await send_signals(context)
+    elif query.data == "stop":
+        user_settings["auto_signals"] = False
+        await query.edit_message_text("⛔️ Автоматичні сигнали вимкнено.")
+    elif query.data == "leverage":
+        await query.edit_message_text("Введіть монету та нове плече (наприклад: SOLUSDT 300):")
+        context.user_data["awaiting"] = "leverage"
+    elif query.data == "margin":
+        await query.edit_message_text("Введіть нову маржу (наприклад: 150):")
+        context.user_data["awaiting"] = "margin"
+    elif query.data == "add":
+        await query.edit_message_text("Введіть монету для додавання (наприклад: ETHUSDT):")
+        context.user_data["awaiting"] = "add"
+    elif query.data == "remove":
+        await query.edit_message_text("Введіть монету для видалення (наприклад: BTCUSDT):")
+        context.user_data["awaiting"] = "remove"
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.upper()
+    awaiting = context.user_data.get("awaiting")
+
+    if awaiting == "leverage":
+        try:
+            symbol, lev = text.split()
+            user_settings["leverage"][symbol] = int(lev)
+            await update.message.reply_text(f"Плече для {symbol} змінено на {lev}x.")
+        except:
+            await update.message.reply_text("⚠️ Неправильний формат.")
+    elif awaiting == "margin":
+        try:
+            user_settings["margin"] = float(text)
+            await update.message.reply_text(f"Маржа змінена на ${text}")
+        except:
+            await update.message.reply_text("⚠️ Введіть число.")
+    elif awaiting == "add":
+        user_settings["symbols"].append(text)
+        await update.message.reply_text(f"Додано монету: {text}")
+    elif awaiting == "remove":
+        try:
+            user_settings["symbols"].remove(text)
+            await update.message.reply_text(f"Видалено монету: {text}")
+        except:
+            await update.message.reply_text(f"⚠️ Монета {text} не знайдена.")
+    context.user_data["awaiting"] = None
+
+# Запуск
 if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    app.job_queue.run_repeating(lambda ctx: send_signals(ctx) if user_settings["auto_signals"] else None, interval=60)
 
-    loop = asyncio.get_event_loop()
-    loop.create_task(auto_check_signals(app))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(CallbackQueryHandler(handle_button))
+
     app.run_polling()
+    asyncio.run(auto_check_signals(app))
