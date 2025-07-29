@@ -40,7 +40,7 @@ def generate_signal(coin, price):
     sl = round(entry * (0.985 if direction == "LONG" else 1.015), 2)
     tp = round(entry * (1.15 if direction == "LONG" else 0.85), 2)
     return (
-        f"📢 Сигнал {direction} по {coin}
+        f"📢 Сигнал {direction} по {coin}"
 "
         f"💰 Вхід: {entry} USDT
 "
