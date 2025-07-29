@@ -3,110 +3,125 @@ import logging
 import requests
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
+import asyncio
 
 BOT_TOKEN = "8441710554:AAGFDgaFwQpcx3bFQ-2FgjjlkK7CEKxmz34"
 CHAT_ID = 681357425
 
-# Початкові значення
 margin = 100
 leverage = {"SOLUSDT": 300, "BTCUSDT": 500, "ETHUSDT": 500}
 symbols = ["SOLUSDT", "BTCUSDT", "ETHUSDT"]
 
-# Кнопки
 main_menu = ReplyKeyboardMarkup(
-    [["Ціни зараз"], ["Змінити маржу", "Змінити плече"], ["Додати монету", "Видалити монету"]],
+    [["Ціни зараз"], ["Змінити маржу", "Змінити плече"]],
     resize_keyboard=True
 )
 
-# Логування
 logging.basicConfig(level=logging.INFO)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Бот запущено! ✅", reply_markup=main_menu)
+# --- Отримання останніх двох свічок
+def get_candles(symbol):
+    url = f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval=1m&limit=2"
+    try:
+        res = requests.get(url, timeout=10)
+        data = res.json()
+        return data
+    except Exception as e:
+        return None
 
-async def show_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "📊 Актуальні ціни:\n"
-    for symbol in symbols:
-        try:
-            r = requests.get(f"https://api.mexc.com/api/v3/ticker/price?symbol={symbol}")
-            price = float(r.json()["price"])
-            text += f"{symbol}: {price} USDT\n"
-        except:
-            text += f"{symbol}: помилка отримання ціни\n"
-    await update.message.reply_text(text)
+# --- Аналіз ринку
+def analyze_market(symbol):
+    candles = get_candles(symbol)
+    if not candles or len(candles) < 2:
+        return None
 
-async def change_margin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Введи нову маржу у $ (наприклад: 150):")
-    context.user_data["awaiting_margin"] = True
+    prev = candles[0]
+    last = candles[1]
 
-async def change_leverage(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Введи монету та нове плече (наприклад: SOLUSDT 400):")
-    context.user_data["awaiting_leverage"] = True
+    open_price = float(last[1])
+    close_price = float(last[4])
+    volume = float(last[5])
+    prev_volume = float(prev[5])
 
-async def add_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Введи монету, яку хочеш додати (наприклад: DOGEUSDT):")
-    context.user_data["awaiting_add_symbol"] = True
-
-async def remove_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Введи монету, яку хочеш видалити (наприклад: BTCUSDT):")
-    context.user_data["awaiting_remove_symbol"] = True
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global margin
-    text = update.message.text.strip().upper()
-
-    if context.user_data.get("awaiting_margin"):
-        if text.isdigit():
-            margin = int(text)
-            await update.message.reply_text(f"✅ Маржу змінено на {margin}$")
-        else:
-            await update.message.reply_text("❌ Невірне значення. Введи число.")
-        context.user_data["awaiting_margin"] = False
-
-    elif context.user_data.get("awaiting_leverage"):
-        parts = text.split()
-        if len(parts) == 2 and parts[1].isdigit():
-            symbol, lev = parts[0], int(parts[1])
-            leverage[symbol] = lev
-            await update.message.reply_text(f"✅ Плече для {symbol} змінено на {lev}×")
-        else:
-            await update.message.reply_text("❌ Формат невірний. Приклад: SOLUSDT 400")
-        context.user_data["awaiting_leverage"] = False
-
-    elif context.user_data.get("awaiting_add_symbol"):
-        if text not in symbols:
-            symbols.append(text)
-            await update.message.reply_text(f"✅ Монету {text} додано.")
-        else:
-            await update.message.reply_text("❗ Така монета вже є.")
-        context.user_data["awaiting_add_symbol"] = False
-
-    elif context.user_data.get("awaiting_remove_symbol"):
-        if text in symbols:
-            symbols.remove(text)
-            await update.message.reply_text(f"🗑 Монету {text} видалено.")
-        else:
-            await update.message.reply_text("❌ Такої монети немає в списку.")
-        context.user_data["awaiting_remove_symbol"] = False
-
-    elif text == "ЦІНИ ЗАРАЗ":
-        await show_prices(update, context)
-    elif text == "ЗМІНИТИ МАРЖУ":
-        await change_margin(update, context)
-    elif text == "ЗМІНИТИ ПЛЕЧЕ":
-        await change_leverage(update, context)
-    elif text == "ДОДАТИ МОНЕТУ":
-        await add_symbol(update, context)
-    elif text == "ВИДАЛИТИ МОНЕТУ":
-        await remove_symbol(update, context)
+    signal_type = None
+    if close_price > open_price and volume > prev_volume:
+        signal_type = "LONG"
+    elif close_price < open_price and volume > prev_volume:
+        signal_type = "SHORT"
     else:
-        await update.message.reply_text("❔ Команду не розпізнано. Вибери з меню.")
+        return None
 
-if __name__ == "__main__":
+    entry = close_price
+    sl = round(entry * (0.99 if signal_type == "LONG" else 1.01), 4)
+    tp = round(entry * (1.05 if signal_type == "LONG" else 0.95), 4)
+
+    return {
+        "symbol": symbol,
+        "type": signal_type,
+        "entry": entry,
+        "sl": sl,
+        "tp": tp,
+        "leverage": leverage[symbol],
+        "margin": margin
+    }
+
+# --- Надсилання сигналу
+async def send_signal(context: ContextTypes.DEFAULT_TYPE):
+    for symbol in symbols:
+        signal = analyze_market(symbol)
+        if signal:
+            text = (
+                f"📈 <b>{signal['symbol']}</b> | <b>{signal['type']}</b> сигнал\n"
+                f"💵 Вхід: <code>{signal['entry']}</code>\n"
+                f"🛡 SL: <code>{signal['sl']}</code>\n"
+                f"🎯 TP: <code>{signal['tp']}</code>\n"
+                f"💰 Маржа: ${signal['margin']}\n"
+                f"⚙ Плече: {signal['leverage']}×"
+            )
+            await context.bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="HTML")
+
+# --- Команди
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Вітаю! Бот запущено ✅", reply_markup=main_menu)
+
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global margin
+    text = update.message.text
+    if text == "Ціни зараз":
+        msg = ""
+        for sym in symbols:
+            try:
+                res = requests.get(f"https://api.mexc.com/api/v3/ticker/price?symbol={sym}", timeout=5).json()
+                price = res.get("price", "–")
+                msg += f"{sym}: {price}\n"
+            except:
+                msg += f"{sym}: помилка\n"
+        await update.message.reply_text(msg)
+    elif text == "Змінити маржу":
+        await update.message.reply_text("Введіть нову маржу (наприклад, 150):")
+        context.user_data["changing_margin"] = True
+    elif text == "Змінити плече":
+        await update.message.reply_text("Функція зміни плеча скоро буде оновлена.")
+    elif context.user_data.get("changing_margin"):
+        try:
+            margin = int(text)
+            context.user_data["changing_margin"] = False
+            await update.message.reply_text(f"Маржу змінено на ${margin}")
+        except:
+            await update.message.reply_text("Введіть коректне число.")
+
+# --- Запуск
+async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
+    app.add_handler(MessageHandler(filters.TEXT, message_handler))
 
-    print("✅ Бот запущено!")
-    app.run_polling()
+    job_queue = app.job_queue
+    job_queue.run_repeating(send_signal, interval=60, first=10)
+
+    print("Бот запущено ✅")
+    await app.run_polling()
+
+if __name__ == "__main__":
+    asyncio.run(main())
