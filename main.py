@@ -88,7 +88,7 @@ async def generate_signal(symbol, price):
         tp = round(entry * (1.10 if trend == "long" else 0.90), 4)
         sl = round(entry * (0.98 if trend == "long" else 1.02), 4)
         return (
-            f"📈 Сигнал на {trend.upper()} по {symbol}
+            f"📈 Сигнал на {trend.upper()} по {symbol}"
 "
             f"🔹 Вхід: {entry} USDT
 "
