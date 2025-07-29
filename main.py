@@ -1,7 +1,7 @@
 import asyncio
 import requests
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters, CallbackContext
 
 BOT_TOKEN = "8441710554:AAGFDgaFwQpcx3bFQ-2FgjjlkK7CEKxmz34"
 CHAT_ID = 681357425
@@ -10,56 +10,60 @@ user_settings = {
     "symbols": ["SOLUSDT", "BTCUSDT", "ETHUSDT"],
     "leverage": {"SOLUSDT": 300, "BTCUSDT": 500, "ETHUSDT": 500},
     "margin": 100,
-    "auto_signals": True
+    "auto_signals": True,
 }
 
+keyboard = [
+    ["Запитати сигнали", "Зупинити сигнали"],
+    ["Змінити плече", "Змінити маржу"],
+    ["Додати монету", "Видалити монету"]
+]
+
+markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("📊 Запитати сигнали", callback_data="ask_signals")],
-        [InlineKeyboardButton("🛑 Зупинити сигнали", callback_data="stop_signals")],
-        [InlineKeyboardButton("Змінити плече", callback_data="change_leverage")],
-        [InlineKeyboardButton("Змінити маржу", callback_data="change_margin")],
-        [InlineKeyboardButton("Додати монету", callback_data="add_symbol")],
-        [InlineKeyboardButton("Видалити монету", callback_data="remove_symbol")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Виберіть опцію:", reply_markup=reply_markup)
+    await update.message.reply_text("🤖 Бот активний. Сигнали надсилаються автоматично.", reply_markup=markup)
 
-async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    if data == "ask_signals":
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+
+    if text == "Запитати сигнали":
         await send_signals(context)
-    elif data == "stop_signals":
+    elif text == "Зупинити сигнали":
         user_settings["auto_signals"] = False
-        await query.edit_message_text("⛔ Автоматичні сигнали зупинено.")
-    elif data == "change_leverage":
-        await query.edit_message_text("Введіть монету і плече (наприклад: SOLUSDT 300):")
-    elif data == "change_margin":
-        await query.edit_message_text("Введіть нову маржу в USD (наприклад: 120):")
-    elif data == "add_symbol":
-        await query.edit_message_text("Введіть монету, яку додати (наприклад: BTCUSDT):")
-    elif data == "remove_symbol":
-        await query.edit_message_text("Введіть монету, яку видалити (наприклад: ETHUSDT):")
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip().upper()
-    if text.replace(" ", "").isdigit():
-        user_settings["margin"] = int(text)
-        await update.message.reply_text(f"Маржа змінена на ${text}")
-    elif " " in text:
+        await update.message.reply_text("⛔️ Автоматичні сигнали зупинено.")
+    elif text == "Змінити плече":
+        await update.message.reply_text("Введіть монету та нове плече, напр.: SOLUSDT 300")
+    elif text == "Змінити маржу":
+        await update.message.reply_text("Введіть нову маржу, напр.: 150")
+    elif text == "Додати монету":
+        await update.message.reply_text("Введіть монету для додавання, напр.: XRPUSDT")
+    elif text == "Видалити монету":
+        await update.message.reply_text("Введіть монету для видалення, напр.: BTCUSDT")
+    else:
         parts = text.split()
         if len(parts) == 2 and parts[1].isdigit():
-            symbol, lev = parts
-            user_settings["leverage"][symbol.upper()] = int(lev)
-            await update.message.reply_text(f"Плече для {symbol.upper()} змінено на {lev}x")
-    elif text in user_settings["symbols"]:
-        user_settings["symbols"].remove(text)
-        await update.message.reply_text(f"{text} видалено зі списку монет.")
-    else:
-        user_settings["symbols"].append(text)
-        await update.message.reply_text(f"{text} додано до списку монет.")
+            symbol = parts[0].upper()
+            if symbol in user_settings["symbols"]:
+                user_settings["leverage"][symbol] = int(parts[1])
+                await update.message.reply_text(f"Плече для {symbol} оновлено до {parts[1]}×")
+            else:
+                user_settings["symbols"].append(symbol)
+                user_settings["leverage"][symbol] = int(parts[1])
+                await update.message.reply_text(f"Додано монету {symbol} з плечем {parts[1]}×")
+        elif len(parts) == 1 and parts[0].isdigit():
+            user_settings["margin"] = int(parts[0])
+            await update.message.reply_text(f"Маржа оновлена до ${parts[0]}")
+        elif len(parts) == 1:
+            symbol = parts[0].upper()
+            if symbol in user_settings["symbols"]:
+                user_settings["symbols"].remove(symbol)
+                await update.message.reply_text(f"Монета {symbol} видалена.")
+            else:
+                user_settings["symbols"].append(symbol)
+                await update.message.reply_text(f"Монета {symbol} додана.")
+        else:
+            await update.message.reply_text("⚠️ Невірний формат.")
 
 async def get_price(symbol):
     try:
@@ -69,40 +73,39 @@ async def get_price(symbol):
     except:
         return None
 
-async def generate_signal(symbol, price):
-    try:
-        url = f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval=1m&limit=2"
-        r = requests.get(url, timeout=5)
-        data = r.json()
-        if len(data) < 2:
-            return None
-        open1, close1 = float(data[-2][1]), float(data[-2][4])
-        open2, close2 = float(data[-1][1]), float(data[-1][4])
-        volume2 = float(data[-1][5])
-        trend = "long" if close1 < close2 and open2 < close2 else "short"
-        if volume2 < sum(float(d[5]) for d in data) / len(data):
-            return None
-        leverage = user_settings["leverage"].get(symbol, 300)
-        margin = user_settings["margin"]
-        entry = price
-        tp = round(entry * (1.10 if trend == "long" else 0.90), 4)
-        sl = round(entry * (0.98 if trend == "long" else 1.02), 4)
-        return (
-            f"📈 Сигнал на {trend.upper()} по {symbol}"
-"
-            f"🔹 Вхід: {entry} USDT
-"
-            f"🎯 Take Profit: {tp}
-"
-            f"🛡 Stop Loss: {sl}
-"
-            f"⚙ Плече: {leverage}x
-"
-            f"💰 Маржа: ${margin}
-"
-        )
-    except:
+def analyze_market(symbol, price):
+    candles = requests.get(f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval=1m&limit=3").json()
+    if len(candles) < 3:
         return None
+
+    last = candles[-2]
+    open_price = float(last[1])
+    close_price = float(last[4])
+    volume = float(last[5])
+    avg_volume = sum(float(c[5]) for c in candles) / len(candles)
+
+    trend = "long" if close_price > open_price and volume >= avg_volume else "short" if close_price < open_price and volume >= avg_volume else None
+    return trend
+
+async def generate_signal(symbol, price):
+    trend = analyze_market(symbol, price)
+    if not trend:
+        return None
+
+    leverage = user_settings["leverage"].get(symbol, 100)
+    margin = user_settings["margin"]
+    entry = price
+    tp = round(price * (1.10 if trend == "long" else 0.90), 4)
+    sl = round(price * (0.98 if trend == "long" else 1.02), 4)
+
+    return (
+        f"📈 Сигнал на {trend.upper()} по {symbol}\n"
+        f"🔹 Вхід: {entry} USDT\n"
+        f"🎯 Take Profit: {tp}\n"
+        f"🛡 Stop Loss: {sl}\n"
+        f"⚙️ Плече: {leverage}×\n"
+        f"💰 Маржа: ${margin}"
+    )
 
 async def send_signals(context: ContextTypes.DEFAULT_TYPE):
     for symbol in user_settings["symbols"]:
@@ -112,20 +115,17 @@ async def send_signals(context: ContextTypes.DEFAULT_TYPE):
             if signal:
                 await context.bot.send_message(chat_id=CHAT_ID, text=signal)
 
-async def auto_check_signals(app):
+async def auto_check(app):
     while True:
         if user_settings["auto_signals"]:
-            await send_signals(app)
+            await send_signals(app.bot)
         await asyncio.sleep(60)
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(CallbackQueryHandler(handle_button))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    async def run():
-        asyncio.create_task(auto_check_signals(app))
-        await app.run_polling()
-
-    asyncio.run(run())
+    loop = asyncio.get_event_loop()
+    loop.create_task(auto_check(app))
+    app.run_polling()
