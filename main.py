@@ -1,6 +1,6 @@
-import logging
-import asyncio
 import os
+import asyncio
+import logging
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -8,87 +8,134 @@ from telegram.ext import (
     MessageHandler,
     filters,
     ContextTypes,
-    CallbackContext
+    CallbackContext,
 )
+import aiohttp
 
-TOKEN = "8441710554:AAGFDgaFwQpcx3bFQ-2FgjjlkK7CEKxmz34"
+# Конфігурація токена і chat_id
+BOT_TOKEN = "8441710554:AAGFDgaFwQpcx3bFQ-2FgjjlkK7CEKxmz34"
 CHAT_ID = 681357425
 
-user_data = {
-    "leverage": {"SOL": 300, "BTC": 500, "ETH": 500},
-    "margin": {"SOL": 100, "BTC": 100, "ETH": 100},
-    "active": True,
-    "coins": ["SOL", "BTC", "ETH"]
-}
+# Початкові значення
+user_margin = {"SOL": 100, "BTC": 100, "ETH": 100}
+user_leverage = {"SOL": 300, "BTC": 500, "ETH": 500}
+monitored_coins = ["SOL", "BTC", "ETH"]
+auto_signals_enabled = True
 
-reply_keyboard = [
-    ["Запитати сигнали", "Зупинити сигнали"],
-    ["Змінити плече", "Змінити маржу"],
-    ["Додати монету", "Видалити монету"]
-]
+keyboard = ReplyKeyboardMarkup(
+    [
+        ["Запитати сигнали", "Зупинити сигнали"],
+        ["Змінити маржу", "Змінити плече"],
+        ["Додати монету", "Видалити монету"],
+        ["Ціни зараз"]
+    ],
+    resize_keyboard=True
+)
 
-markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True)
+logging.basicConfig(level=logging.INFO)
+
+async def get_price(symbol: str):
+    url = f"https://api.mexc.com/api/v3/ticker/price?symbol={symbol}USDT"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as response:
+                data = await response.json()
+                return float(data["price"])
+    except:
+        return None
+
+def calculate_signal(price, margin, leverage, direction):
+    entry = round(price, 2)
+    tp = round(entry * (1.4 if direction == "LONG" else 0.6), 2)
+    sl = round(entry * (0.97 if direction == "LONG" else 1.03), 2)
+    profit = round((margin * leverage * abs(tp - entry)) / entry, 2)
+    return entry, sl, tp, profit
+
+async def generate_signals(context: ContextTypes.DEFAULT_TYPE):
+    global auto_signals_enabled
+    if not auto_signals_enabled:
+        return
+
+    for coin in monitored_coins:
+        symbol = coin + "USDT"
+        price = await get_price(symbol)
+        if price:
+            direction = "LONG" if price % 2 < 1 else "SHORT"
+            entry, sl, tp, profit = calculate_signal(price, user_margin[coin], user_leverage[coin], direction)
+            text = (
+                f"Сигнал {direction} по {coin}\n"
+                f"Вхід: {entry} USDT\n"
+                f"SL: {sl}\n"
+                f"TP: {tp}\n"
+                f"Маржа: ${user_margin[coin]}\n"
+                f"Плече: {user_leverage[coin]}×\n"
+                f"Очікуваний прибуток: ${profit}"
+            )
+            await context.bot.send_message(chat_id=CHAT_ID, text=text)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Бот запущено!", reply_markup=markup)
+    await update.message.reply_text("Бот запущено", reply_markup=keyboard)
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if text == "Зупинити сигнали":
-        user_data["active"] = False
-        await update.message.reply_text("Автоматичні сигнали зупинено.")
-    elif text == "Запитати сигнали":
-        await send_signal(update, context)
-    elif text == "Змінити плече":
-        await update.message.reply_text("Введіть нове плече у форматі: SOL 300")
-    elif text == "Змінити маржу":
-        await update.message.reply_text("Введіть нову маржу у $ у форматі: SOL 150")
-    elif text == "Додати монету":
-        await update.message.reply_text("Напишіть символ монети, яку хочете додати (наприклад: ARB)")
-    elif text == "Видалити монету":
-        await update.message.reply_text("Напишіть символ монети, яку хочете видалити (наприклад: SOL)")
-    elif text.upper().startswith("SOL") or text.upper().startswith("BTC") or text.upper().startswith("ETH"):
-        try:
-            coin, value = text.upper().split()
-            value = int(value)
-            if "марж" in update.message.text.lower():
-                user_data["margin"][coin] = value
-                await update.message.reply_text(f"Нова маржа для {coin}: ${value}")
-            else:
-                user_data["leverage"][coin] = value
-                await update.message.reply_text(f"Нове плече для {coin}: {value}×")
-        except:
-            await update.message.reply_text("Невірний формат. Приклад: SOL 300")
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global auto_signals_enabled
+
+    text = update.message.text.upper()
+
+    if text == "ЦІНИ ЗАРАЗ":
+        response = ""
+        for coin in monitored_coins:
+            price = await get_price(coin + "USDT")
+            if price:
+                response += f"{coin}USDT: {price} USDT\n"
+        await update.message.reply_text(response or "Помилка отримання цін.")
+    
+    elif text == "ЗАПИТАТИ СИГНАЛИ":
+        await generate_signals(context)
+
+    elif text == "ЗУПИНИТИ СИГНАЛИ":
+        auto_signals_enabled = False
+        await update.message.reply_text("Автосигнали зупинено.")
+
+    elif text == "ЗМІНИТИ МАРЖУ":
+        await update.message.reply_text("Введіть нову маржу в $:\nНаприклад: SOL 200")
+
+    elif text == "ЗМІНИТИ ПЛЕЧЕ":
+        await update.message.reply_text("Введіть нове плече:\nНаприклад: BTC 400")
+
+    elif text == "ДОДАТИ МОНЕТУ":
+        await update.message.reply_text("Введіть монету для додавання:\nНаприклад: LTC")
+
+    elif text == "ВИДАЛИТИ МОНЕТУ":
+        await update.message.reply_text("Введіть монету для видалення:\nНаприклад: BTC")
+
     else:
-        coin = text.upper()
-        if coin in user_data["coins"]:
-            user_data["coins"].remove(coin)
-            await update.message.reply_text(f"Монету {coin} видалено.")
-        else:
-            user_data["coins"].append(coin)
-            await update.message.reply_text(f"Монету {coin} додано.")
+        parts = text.split()
+        if len(parts) == 2:
+            coin, value = parts[0], parts[1]
+            if coin in monitored_coins:
+                if update.message.text.lower().startswith("змінити маржу") or value.isdigit():
+                    user_margin[coin] = int(value)
+                    await update.message.reply_text(f"Маржу для {coin} змінено на ${value}")
+                elif update.message.text.lower().startswith("змінити плече"):
+                    user_leverage[coin] = int(value)
+                    await update.message.reply_text(f"Плече для {coin} змінено на {value}×")
+            else:
+                if value.isdigit():
+                    monitored_coins.append(coin)
+                    await update.message.reply_text(f"Монету {coin} додано.")
+                elif coin in monitored_coins:
+                    monitored_coins.remove(coin)
+                    await update.message.reply_text(f"Монету {coin} видалено.")
 
-async def send_signal(update: Update, context: CallbackContext):
-    for coin in user_data["coins"]:
-        direction = "LONG"  # Це просто приклад
-        entry = 100  # приклад
-        sl = 95
-        tp = 150
-        leverage = user_data["leverage"].get(coin, 100)
-        margin = user_data["margin"].get(coin, 100)
-        text = f"Сигнал {direction} по {coin}
-Вхід: {entry} USDT
-SL: {sl} USDT
-TP: {tp} USDT
-Маржа: {margin}$
-Плече: {leverage}×"
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=text)
+async def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+
+    job_queue = app.job_queue
+    job_queue.run_repeating(generate_signals, interval=60, first=5)
+
+    await app.run_polling()
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    app.run_polling()
+    asyncio.run(main())
